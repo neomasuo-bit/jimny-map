@@ -715,6 +715,7 @@ function toggleFogMode() {
     btn.style.borderColor = '#4A9EFF';
     btn.style.color = '#4A9EFF';
     tracks.forEach(t => t.line.setStyle({ opacity: 0 }));
+    if (gpsPolyline) gpsPolyline.setStyle({ opacity: 0 }); /* 記録中ラインも非表示 */
     drawFog();
   } else {
     fogCanvas.classList.remove('show');
@@ -724,6 +725,7 @@ function toggleFogMode() {
       const color = DIFF[t.difficulty || 'unset'] ? DIFF[t.difficulty || 'unset'].color : '#888';
       t.line.setStyle({ opacity: 0.9, color });
     });
+    if (gpsPolyline) gpsPolyline.setStyle({ opacity: 0.9, color: '#E8852A' }); /* 線モード復元 */
   }
 }
 
@@ -734,21 +736,23 @@ function drawFog() {
   fogCanvas.width = w;
   fogCanvas.height = h;
 
-  fogCtx.fillStyle = 'rgba(0,0,0,0.80)';
+  fogCtx.fillStyle = 'rgba(0,0,0,0.60)'; /* 変更前: 0.80 */
   fogCtx.fillRect(0, 0, w, h);
   fogCtx.globalCompositeOperation = 'destination-out';
 
-  tracks.forEach(t => {
-    t.latlngs.forEach(ll => {
-      const pt = map.latLngToContainerPoint(ll);
-      const grad = fogCtx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, 32);
-      grad.addColorStop(0, 'rgba(0,0,0,1)');
-      grad.addColorStop(0.6, 'rgba(0,0,0,0.85)');
-      grad.addColorStop(1, 'rgba(0,0,0,0)');
-      fogCtx.fillStyle = grad;
-      fogCtx.fillRect(pt.x - 32, pt.y - 32, 64, 64);
-    });
-  });
+  const clearRadius = 16; /* 変更前: 32 (GPSアイコンradius:8 の約2倍) */
+  const clearFogAt = ll => {
+    const pt = map.latLngToContainerPoint(ll);
+    const grad = fogCtx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, clearRadius);
+    grad.addColorStop(0, 'rgba(0,0,0,1)');
+    grad.addColorStop(0.6, 'rgba(0,0,0,0.85)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    fogCtx.fillStyle = grad;
+    fogCtx.fillRect(pt.x - clearRadius, pt.y - clearRadius, clearRadius * 2, clearRadius * 2);
+  };
+
+  tracks.forEach(t => t.latlngs.forEach(clearFogAt));
+  gpsTrack.forEach(clearFogAt); /* 記録中のGPSトラックも霧を晴らす */
 
   fogCtx.globalCompositeOperation = 'source-over';
 }
@@ -852,6 +856,7 @@ function startGPS() {
       radius: 8, color: '#fff', fillColor: '#4A9EFF', fillOpacity: 1, weight: 2
     }).addTo(map);
     map.panTo(latlng);
+    if (fogMode) drawFog(); /* 霧モード時は位置更新のたびに霧を再描画 */
     if (gpsTrack.length > 1) {
       let km = 0;
       for (let i = 1; i < gpsTrack.length; i++) km += map.distance(gpsTrack[i-1], gpsTrack[i]);
