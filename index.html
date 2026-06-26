@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>ジムニー林道マップ</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
@@ -44,6 +44,7 @@
     z-index: 1000;
     display: flex;
     gap: 4px;
+    touch-action: none;
   }
   .layer-btn {
     background: #111e;
@@ -77,6 +78,7 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
+    touch-action: manipulation;
   }
   #gps-btn.recording {
     background: #E8852A;
@@ -121,6 +123,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    touch-action: none;
   }
   #sub-left {
     position: absolute;
@@ -130,6 +133,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    touch-action: none;
   }
   .sub-btn {
     background: #111e;
@@ -336,6 +340,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    touch-action: manipulation;
   }
   #locate-btn:hover { border-color: #4A9EFF; color: #4A9EFF; }
   #locate-btn.active { border-color: #4A9EFF; color: #4A9EFF; }
@@ -622,8 +627,20 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const map = L.map('map', { zoomControl: false }).setView([36.5, 138.0], 9);
+const map = L.map('map', {
+  zoomControl: false,
+  bounceAtZoomLimits: false,
+  touchZoom: true,
+}).setView([36.5, 138.0], 9);
 L.control.zoom({ position: 'topright' }).addTo(map);
+
+['layer-switcher', 'sub-btns', 'sub-left'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    L.DomEvent.disableScrollPropagation(el);
+    L.DomEvent.disableClickPropagation(el);
+  }
+});
 
 const layers = {
   standard: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
