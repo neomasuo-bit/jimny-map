@@ -753,7 +753,7 @@ function drawFog() {
   fogCanvas.width = w;
   fogCanvas.height = h;
 
-  fogCtx.fillStyle = 'rgba(180,180,180,0.55)'; /* 変更前: 0.80 */
+  fogCtx.fillStyle = 'rgba(50,50,50,0.6)'; /* 変更前: 0.80 */
   fogCtx.fillRect(0, 0, w, h);
   fogCtx.globalCompositeOperation = 'destination-out';
 
@@ -762,7 +762,7 @@ function drawFog() {
     const pt = map.latLngToContainerPoint(ll);
     const grad = fogCtx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, clearRadius);
     grad.addColorStop(0, 'rgba(0,0,0,1)');
-    grad.addColorStop(0.6, 'rgba(200,200,200,0.6)');
+    grad.addColorStop(0.6, 'rgba(50,50,50,0.85)');
     grad.addColorStop(1, 'rgba(0,0,0,0)');
     fogCtx.fillStyle = grad;
     fogCtx.fillRect(pt.x - clearRadius, pt.y - clearRadius, clearRadius * 2, clearRadius * 2);
