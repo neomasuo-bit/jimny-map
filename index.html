@@ -696,13 +696,20 @@ let currentPinData = null;
 
 // GPS
 let gpsWatcher = null;
-let gpsTrack = [];
-let gpsPolyline = null;
+let gpsSegments = [[]];   // 記録中の軌跡（セグメント配列。復帰時のギャップで分割される）
+let gpsPolylines = [];    // gpsSegments に対応する L.Polyline 配列
 let gpsStartTime = null;
 let timerInterval = null;
 let currentMarker = null;
+let currentSessionId = null;
+let pendingGapCheck = false; // 復帰直後の最初のフィックスでギャップ判定を行うフラグ
 
-loadFromStorage();
+// 現在地の補間アニメーション
+let displayedLatLng = null;
+let animRAF = null;
+
+// Wake Lock
+let wakeLock = null;
 
 // ---- GPS ----
 function goToCurrentLocation() {
@@ -731,8 +738,8 @@ function toggleFogMode() {
     fogCanvas.classList.add('show');
     btn.style.borderColor = '#4A9EFF';
     btn.style.color = '#4A9EFF';
-    tracks.forEach(t => t.line.setStyle({ opacity: 0 }));
-    if (gpsPolyline) gpsPolyline.setStyle({ opacity: 0 }); /* 記録中ラインも非表示 */
+    tracks.forEach(t => t.lines.forEach(l => l.setStyle({ opacity: 0 })));
+    gpsPolylines.forEach(l => l.setStyle({ opacity: 0 })); /* 記録中ラインも非表示 */
     drawFog();
   } else {
     fogCanvas.classList.remove('show');
@@ -740,10 +747,11 @@ function toggleFogMode() {
     btn.style.color = '';
     tracks.forEach(t => {
       const color = DIFF[t.difficulty || 'unset'] ? DIFF[t.difficulty || 'unset'].color : '#888';
-      t.line.setStyle({ opacity: 0.9, color });
+      t.lines.forEach(l => l.setStyle({ opacity: 0.9, color }));
     });
-    if (gpsPolyline) gpsPolyline.setStyle({ opacity: 0.9, color: '#E8852A' }); /* 線モード復元 */
+    gpsPolylines.forEach(l => l.setStyle({ opacity: 0.9, color: '#E8852A' })); /* 線モード復元 */
   }
+  saveSessionState();
 }
 
 function drawFog() {
@@ -768,8 +776,8 @@ function drawFog() {
     fogCtx.fillRect(pt.x - clearRadius, pt.y - clearRadius, clearRadius * 2, clearRadius * 2);
   };
 
-  tracks.forEach(t => t.latlngs.forEach(clearFogAt));
-  gpsTrack.forEach(clearFogAt); /* 記録中のGPSトラックも霧を晴らす */
+  tracks.forEach(t => t.segments.flat().forEach(clearFogAt));
+  gpsSegments.flat().forEach(clearFogAt); /* 記録中のGPSトラックも霧を晴らす */
 
   fogCtx.globalCompositeOperation = 'source-over';
 }
@@ -812,16 +820,17 @@ function openHistory() {
 
 function focusTrack(idx) {
   const t = tracks[idx];
-  if (!t || !t.latlngs.length) return;
+  const flat = t ? t.segments.flat() : [];
+  if (!t || !flat.length) return;
   document.getElementById('history-panel').classList.remove('open');
-  map.fitBounds(L.latLngBounds(t.latlngs), { padding: [60, 60] });
+  map.fitBounds(L.latLngBounds(flat), { padding: [60, 60] });
 }
 
 function deleteTrack(idx) {
   const t = tracks[idx];
   if (!t) return;
   if (!confirm('この走行記録を削除しますか？')) return;
-  if (t.line) map.removeLayer(t.line);
+  t.lines.forEach(l => map.removeLayer(l));
   totalKm -= t.km || 0;
   tracks.splice(idx, 1);
   saveToStorage();
@@ -839,7 +848,7 @@ function setDifficulty(diff) {
   const track = tracks[selectedTrackIndex];
   track.difficulty = diff;
   const color = DIFF[diff].color;
-  track.line.setStyle({ color });
+  track.lines.forEach(l => l.setStyle({ color }));
   saveToStorage();
   document.getElementById('diff-modal').classList.remove('open');
   selectedTrackIndex = null;
@@ -849,36 +858,60 @@ function toggleGPS() {
   gpsWatcher !== null ? stopGPS() : startGPS();
 }
 
-function startGPS() {
+function computeSegmentsKm(segments) {
+  let km = 0;
+  segments.forEach(seg => {
+    for (let i = 1; i < seg.length; i++) km += map.distance(seg[i-1], seg[i]);
+  });
+  return km / 1000;
+}
+
+function startGPS(resumeState) {
   if (!navigator.geolocation) { alert('GPSに対応していません'); return; }
-  gpsTrack = [];
-  gpsStartTime = Date.now();
+  if (!resumeState) {
+    gpsSegments = [[]];
+    gpsPolylines = [];
+    gpsStartTime = Date.now();
+    currentSessionId = 's' + gpsStartTime;
+  }
   const btn = document.getElementById('gps-btn');
   btn.classList.add('recording');
   document.getElementById('gps-icon').textContent = '⏹';
   document.getElementById('gps-label').textContent = '停止';
   document.getElementById('live-badge').classList.add('show');
+  clearInterval(timerInterval);
   timerInterval = setInterval(updateTimer, 1000);
+  requestWakeLock();
+  saveSessionState();
 
   gpsWatcher = navigator.geolocation.watchPosition(pos => {
     const latlng = [pos.coords.latitude, pos.coords.longitude];
-    gpsTrack.push(latlng);
-    if (!gpsPolyline) {
-      gpsPolyline = L.polyline([latlng], { color: '#E8852A', weight: 5, opacity: 0.9 }).addTo(map);
+    let seg = gpsSegments[gpsSegments.length - 1];
+    if (pendingGapCheck) {
+      pendingGapCheck = false;
+      if (seg.length > 0 && map.distance(seg[seg.length - 1], latlng) >= 50) {
+        seg = [];
+        gpsSegments.push(seg);
+      }
+    }
+    seg.push(latlng);
+
+    if (gpsPolylines.length < gpsSegments.length) {
+      const opacity = fogMode ? 0 : 0.9;
+      gpsPolylines.push(L.polyline([latlng], { color: '#E8852A', weight: 5, opacity }).addTo(map));
     } else {
-      gpsPolyline.addLatLng(latlng);
+      gpsPolylines[gpsPolylines.length - 1].addLatLng(latlng);
     }
-    if (currentMarker) map.removeLayer(currentMarker);
-    currentMarker = L.circleMarker(latlng, {
-      radius: 8, color: '#fff', fillColor: '#4A9EFF', fillOpacity: 1, weight: 2
-    }).addTo(map);
-    map.panTo(latlng);
-    if (fogMode) drawFog(); /* 霧モード時は位置更新のたびに霧を再描画 */
-    if (gpsTrack.length > 1) {
-      let km = 0;
-      for (let i = 1; i < gpsTrack.length; i++) km += map.distance(gpsTrack[i-1], gpsTrack[i]);
-      document.getElementById('live-km').textContent = (km/1000).toFixed(1);
+
+    moveCurrentPosition(latlng);
+    if (fogMode) drawFog(); /* 霧モード時は位置更新のたびに霧を再描画（実GPS座標ベース） */
+
+    const totalPts = gpsSegments.reduce((n, s) => n + s.length, 0);
+    if (totalPts > 1) {
+      document.getElementById('live-km').textContent = computeSegmentsKm(gpsSegments).toFixed(1);
     }
+    saveSessionState();
+    saveActiveTrack();
   }, err => console.warn(err.message), { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 });
 }
 
@@ -886,6 +919,9 @@ function stopGPS() {
   navigator.geolocation.clearWatch(gpsWatcher);
   gpsWatcher = null;
   clearInterval(timerInterval);
+  releaseWakeLock();
+  if (animRAF) { cancelAnimationFrame(animRAF); animRAF = null; }
+  displayedLatLng = null;
   const btn = document.getElementById('gps-btn');
   btn.classList.remove('recording');
   document.getElementById('gps-icon').textContent = '📍';
@@ -894,20 +930,28 @@ function stopGPS() {
   document.getElementById('live-badge').classList.remove('show');
   if (currentMarker) { map.removeLayer(currentMarker); currentMarker = null; }
 
-  if (gpsTrack.length > 1) {
-    let km = 0;
-    for (let i = 1; i < gpsTrack.length; i++) km += map.distance(gpsTrack[i-1], gpsTrack[i]);
-    totalKm += km / 1000;
-    const latlngs = [...gpsTrack];
+  const totalPts = gpsSegments.reduce((n, s) => n + s.length, 0);
+  if (totalPts > 1) {
+    const km = computeSegmentsKm(gpsSegments);
+    totalKm += km;
+    const segments = gpsSegments.map(s => [...s]);
     const idx = tracks.length;
-    gpsPolyline.setStyle({ color: '#888' });
-    gpsPolyline.on('click', () => openDiffModal(idx));
-    tracks.push({ latlngs, km: km/1000, date: new Date().toLocaleDateString('ja-JP'), difficulty: 'unset', line: gpsPolyline });
+    const lines = gpsPolylines;
+    lines.forEach(l => {
+      l.setStyle({ color: '#888' });
+      l.on('click', () => openDiffModal(idx));
+    });
+    tracks.push({ segments, km, date: new Date().toLocaleDateString('ja-JP'), difficulty: 'unset', lines });
     saveToStorage();
     updateStats();
+  } else {
+    gpsPolylines.forEach(l => map.removeLayer(l));
   }
-  gpsPolyline = null;
-  gpsTrack = [];
+  gpsPolylines = [];
+  gpsSegments = [[]];
+  currentSessionId = null;
+  clearActiveTrack();
+  saveSessionState();
 }
 
 function updateTimer() {
@@ -920,6 +964,157 @@ function updateTimer() {
   timer.textContent = h > 0
     ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
     : `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+// ---- 現在地マーカーの補間アニメーション ----
+function moveCurrentPosition(newLatLng) {
+  if (animRAF) { cancelAnimationFrame(animRAF); animRAF = null; }
+  const from = displayedLatLng;
+  if (!from || map.distance(from, newLatLng) > 200) {
+    displayedLatLng = newLatLng;
+    renderCurrentPosition(newLatLng);
+    return;
+  }
+  const duration = 1000;
+  const t0 = performance.now();
+  const fromLL = from;
+  function step(now) {
+    const t = Math.min((now - t0) / duration, 1);
+    displayedLatLng = [
+      fromLL[0] + (newLatLng[0] - fromLL[0]) * t,
+      fromLL[1] + (newLatLng[1] - fromLL[1]) * t,
+    ];
+    renderCurrentPosition(displayedLatLng);
+    animRAF = t < 1 ? requestAnimationFrame(step) : null;
+  }
+  animRAF = requestAnimationFrame(step);
+}
+
+function renderCurrentPosition(latlng) {
+  if (currentMarker) currentMarker.setLatLng(latlng);
+  else currentMarker = L.circleMarker(latlng, { radius: 8, color: '#fff', fillColor: '#4A9EFF', fillOpacity: 1, weight: 2 }).addTo(map);
+  map.setView(latlng, map.getZoom(), { animate: false });
+}
+
+// ---- Wake Lock ----
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch (e) { console.log('WakeLock取得失敗', e); }
+}
+
+function releaseWakeLock() {
+  try {
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  } catch (e) { console.log('WakeLock解放失敗', e); }
+}
+
+// ---- セッション状態の永続化（復帰用） ----
+function saveSessionState() {
+  try {
+    localStorage.setItem('jimny_session_state', JSON.stringify({
+      recording: gpsWatcher !== null,
+      fogMode,
+      sessionId: currentSessionId,
+      gpsStartTime,
+    }));
+  } catch (e) { console.log('セッション状態の保存失敗', e); }
+}
+
+function loadSessionState() {
+  try {
+    return JSON.parse(localStorage.getItem('jimny_session_state') || 'null');
+  } catch (e) { return null; }
+}
+
+function clearSessionState() {
+  localStorage.removeItem('jimny_session_state');
+}
+
+function saveActiveTrack() {
+  try {
+    localStorage.setItem('jimny_active_track', JSON.stringify({
+      sessionId: currentSessionId,
+      segments: gpsSegments,
+    }));
+  } catch (e) { console.log('記録中データの保存失敗', e); }
+}
+
+function loadActiveTrack() {
+  try {
+    return JSON.parse(localStorage.getItem('jimny_active_track') || 'null');
+  } catch (e) { return null; }
+}
+
+function clearActiveTrack() {
+  localStorage.removeItem('jimny_active_track');
+}
+
+// ---- 復帰処理 ----
+function restoreFogIfNeeded(state) {
+  if (!state || !state.fogMode) return;
+  fogMode = true;
+  const btn = document.getElementById('fog-toggle-btn');
+  fogCanvas.classList.add('show');
+  btn.style.borderColor = '#4A9EFF';
+  btn.style.color = '#4A9EFF';
+  tracks.forEach(t => t.lines.forEach(l => l.setStyle({ opacity: 0 })));
+  gpsPolylines.forEach(l => l.setStyle({ opacity: 0 }));
+  drawFog();
+}
+
+function initSessionRecovery() {
+  const state = loadSessionState();
+  if (state && state.recording) {
+    if (confirm('前回の記録が中断されています。再開しますか？')) {
+      const active = loadActiveTrack();
+      if (active && active.sessionId === state.sessionId && active.segments && active.segments.length) {
+        gpsSegments = active.segments;
+        gpsStartTime = state.gpsStartTime || Date.now();
+        currentSessionId = state.sessionId;
+        gpsSegments.forEach(seg => {
+          if (seg.length) {
+            const opacity = state.fogMode ? 0 : 0.9;
+            gpsPolylines.push(L.polyline(seg, { color: '#E8852A', weight: 5, opacity }).addTo(map));
+          }
+        });
+        const lastSeg = gpsSegments[gpsSegments.length - 1];
+        if (lastSeg.length) {
+          displayedLatLng = lastSeg[lastSeg.length - 1];
+          renderCurrentPosition(displayedLatLng);
+        }
+      } else {
+        gpsSegments = [[]];
+        gpsStartTime = state.gpsStartTime || Date.now();
+        currentSessionId = state.sessionId || ('s' + Date.now());
+      }
+      pendingGapCheck = true;
+      restoreFogIfNeeded(state);
+      startGPS(true);
+    } else {
+      clearSessionState();
+      clearActiveTrack();
+    }
+  } else {
+    restoreFogIfNeeded(state);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    const s = loadSessionState();
+    if (!s) return;
+    if (s.recording) {
+      requestWakeLock();
+      if (gpsWatcher === null) {
+        pendingGapCheck = true;
+        startGPS(true);
+      }
+    }
+    if (s.fogMode && !fogMode) restoreFogIfNeeded(s);
+    else if (fogMode) drawFog();
+  });
 }
 
 // ---- GPX ----
@@ -938,7 +1133,7 @@ function loadGPX(input) {
     const line = L.polyline(latlngs, { color: '#888', weight: 5, opacity: 0.9 }).addTo(map);
     const idx = tracks.length;
     line.on('click', () => openDiffModal(idx));
-    tracks.push({ latlngs, km: km/1000, date: file.name, difficulty: 'unset', line });
+    tracks.push({ segments: [latlngs], km: km/1000, date: file.name, difficulty: 'unset', lines: [line] });
     map.fitBounds(line.getBounds(), { padding: [60,60] });
     saveToStorage(); updateStats();
     input.value = '';
@@ -1168,7 +1363,7 @@ function toEmbedUrl(url) {
 
 function clearAll() {
   if (!confirm('全ての走行記録とピンを削除しますか？')) return;
-  tracks.forEach(t => { if (t.line) map.removeLayer(t.line); });
+  tracks.forEach(t => t.lines.forEach(l => map.removeLayer(l)));
   pins.forEach(p => { if (p.marker) map.removeLayer(p.marker); });
   tracks = []; pins = []; totalKm = 0;
   localStorage.removeItem('jimny-tracks');
@@ -1185,7 +1380,7 @@ function updateStats() {
 function saveToStorage() {
   try {
     localStorage.setItem('jimny-tracks', JSON.stringify(
-      tracks.map(t => ({ latlngs: t.latlngs, km: t.km, date: t.date, difficulty: t.difficulty || 'unset' }))
+      tracks.map(t => ({ segments: t.segments, km: t.km, date: t.date, difficulty: t.difficulty || 'unset' }))
     ));
     localStorage.setItem('jimny-pins', JSON.stringify(
       pins.map(p => ({ latlng: p.latlng, cat: p.cat, name: p.name, note: p.note, url: p.url, embedUrl: p.embedUrl, orient: p.orient, photo: p.photo, date: p.date }))
@@ -1199,21 +1394,28 @@ function loadFromStorage() {
     savedTracks.forEach(t => {
       const diff = t.difficulty || 'unset';
       const color = DIFF[diff] ? DIFF[diff].color : '#888';
-      const line = L.polyline(t.latlngs, { color, weight: 5, opacity: 0.9 }).addTo(map);
+      const segments = t.segments || [t.latlngs || []]; /* 旧形式（単一latlngs）との後方互換 */
       const idx = tracks.length;
-      line.on('click', () => openDiffModal(idx));
-      tracks.push({ ...t, difficulty: diff, line });
+      const lines = segments.map(seg => {
+        const line = L.polyline(seg, { color, weight: 5, opacity: 0.9 }).addTo(map);
+        line.on('click', () => openDiffModal(idx));
+        return line;
+      });
+      tracks.push({ segments, km: t.km, date: t.date, difficulty: diff, lines });
       totalKm += t.km || 0;
     });
     const savedPins = JSON.parse(localStorage.getItem('jimny-pins') || '[]');
     savedPins.forEach(p => { addPinToMap(p); pins.push(p); });
     updateStats();
     if (tracks.length > 0) {
-      const bounds = L.latLngBounds(tracks.flatMap(t => t.latlngs));
+      const bounds = L.latLngBounds(tracks.flatMap(t => t.segments.flat()));
       map.fitBounds(bounds, { padding: [60,60] });
     }
   } catch(e) {}
 }
+
+loadFromStorage();
+initSessionRecovery();
 </script>
 </body>
 </html>
