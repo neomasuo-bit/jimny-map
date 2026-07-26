@@ -33,11 +33,8 @@
     pointer-events: none;
     z-index: 400;
     display: none;
-    transform-origin: 0 0;
   }
   #fog-canvas.show { display: block; }
-  /* ズームアニメーション中だけ地図本体と同じtransition(Leaflet標準の0.25s/easing)を適用し、追従させる */
-  #fog-canvas.zoom-anim { transition: transform 0.25s cubic-bezier(0,0,0.25,1); }
 
   /* 地図切り替え */
   #layer-switcher {
@@ -930,24 +927,7 @@ function drawFog() {
   fogCtx.globalCompositeOperation = 'source-over';
 }
 
-// ズームアニメーション開始と同時にfog-canvasへもCSS transformを適用し、地図本体のズームアニメーションに近似追従させる
-// （fog-canvasはLeafletのペイン外にある独自Canvasなので、地図パネルの自動追従の対象外。手動で合わせる）
-map.on('zoomanim', (e) => {
-  if (!fogMode) return;
-  const scale = map.getZoomScale(e.zoom, map.getZoom());
-  const offset = map._latLngToNewLayerPoint(map.getBounds().getNorthWest(), e.zoom, e.center);
-  fogCanvas.classList.add('zoom-anim');
-  L.DomUtil.setTransform(fogCanvas, offset, scale);
-});
-
-// アニメーション完了後（'zoom'/'move'/'moveend'/'zoomend'はズーム時、アニメーション終了時に発火）に
-// 近似transformを解除し、drawFog()で正確な位置に描き直す
-map.on('move zoom moveend zoomend', () => {
-  if (!fogMode) return;
-  fogCanvas.classList.remove('zoom-anim');
-  L.DomUtil.setTransform(fogCanvas, new L.Point(0, 0), 1);
-  drawFog();
-});
+map.on('move zoom moveend zoomend', () => { if (fogMode) drawFog(); });
 
 // ---- ヘディングアップ ----
 let headingUp = false;
