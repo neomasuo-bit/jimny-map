@@ -509,6 +509,9 @@
     </svg>
   </button>
 
+  <!-- [DEBUG] webkitCompassHeading調査用の一時表示。確認後に削除すること -->
+  <div id="heading-debug" style="display:none; position:absolute; top:200px; right:12px; z-index:1000; background:rgba(0,0,0,0.8); color:#0f0; font-family:monospace; font-size:11px; line-height:1.5; padding:6px 8px; border-radius:6px; white-space:pre; max-width:240px; pointer-events:none;"></div>
+
   <!-- 凡例 -->
   <div id="legend">
     <div class="leg-row"><div class="leg-line" style="background:#4CAF50"></div>フラット（普通車OK）</div>
@@ -1012,11 +1015,28 @@ function saveHeadingUpPref(v) {
 // 実機ごとにズレが出ることがあるため実機確認しながら調整すること。
 function computeCompassHeading(event) {
   if (typeof event.webkitCompassHeading === 'number') {
+    updateHeadingDebug(event, 'webkitCompassHeading', event.webkitCompassHeading);
     return event.webkitCompassHeading;
   }
-  if (event.alpha === null || event.alpha === undefined) return null;
+  if (event.alpha === null || event.alpha === undefined) {
+    updateHeadingDebug(event, 'alpha無効(null/undefined)', null);
+    return null;
+  }
   const screenAngle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
-  return (360 - event.alpha + screenAngle + 360) % 360;
+  const heading = (360 - event.alpha + screenAngle + 360) % 360;
+  updateHeadingDebug(event, 'alpha補正', heading);
+  return heading;
+}
+
+// [DEBUG] webkitCompassHeadingが原因かどうかを実機で切り分けるための一時表示。確認後に削除すること。
+function updateHeadingDebug(event, branch, heading) {
+  const dbg = document.getElementById('heading-debug');
+  if (!dbg) return;
+  dbg.textContent =
+    `webkitCompassHeading: ${event.webkitCompassHeading} (${typeof event.webkitCompassHeading})\n` +
+    `alpha: ${event.alpha}\n` +
+    `branch: ${branch}\n` +
+    `heading: ${heading === null ? 'null' : heading.toFixed(1)}`;
 }
 
 function handleOrientationEvent(event) {
@@ -1035,6 +1055,8 @@ function startHeadingUp() {
   headingUp = true;
   saveHeadingUpPref(true);
   updateHeadingToggleBtn();
+  const dbg = document.getElementById('heading-debug');
+  if (dbg) dbg.style.display = 'block';
 }
 
 function stopHeadingUp() {
@@ -1047,6 +1069,8 @@ function stopHeadingUp() {
   map.setBearing(0);
   if (fogMode) applyFogCanvasTransform();
   updateHeadingToggleBtn();
+  const dbg = document.getElementById('heading-debug');
+  if (dbg) dbg.style.display = 'none';
 }
 
 function updateHeadingToggleBtn() {
