@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>ジムニー林道マップ</title>
+<title>霧が晴れる</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -345,6 +345,28 @@
   #locate-btn:hover { border-color: #4A9EFF; color: #4A9EFF; }
   #locate-btn.active { border-color: #4A9EFF; color: #4A9EFF; }
 
+  /* ヘディングアップ切替ボタン */
+  #heading-toggle-btn {
+    position: absolute;
+    top: 158px;
+    right: 12px;
+    z-index: 1000;
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    background: #111e;
+    border: 1px solid #555;
+    color: #ccc;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: manipulation;
+  }
+  #heading-toggle-btn:hover { border-color: #4A9EFF; color: #4A9EFF; }
+  #heading-toggle-btn.active { border-color: #4A9EFF; color: #4A9EFF; background: #4A9EFF33; }
+
   /* 凡例 */
   #legend {
     position: absolute;
@@ -421,7 +443,7 @@
 <body>
 
 <div id="header">
-  <h1>🚙 ジムニー林道マップ</h1>
+  <h1>🚙 霧が晴れる</h1>
   <div id="stats">
     <span>走行 <b id="stat-km">0</b> km</span>
     <span>ピン <b id="stat-pins">0</b></span>
@@ -477,6 +499,9 @@
 
   <!-- 現在地ボタン -->
   <button id="locate-btn" onclick="goToCurrentLocation()" title="現在地へ">⊕</button>
+
+  <!-- ヘディングアップ切替 -->
+  <button id="heading-toggle-btn" onclick="toggleHeadingUp()" title="ヘディングアップ切替">🧭</button>
 
   <!-- 凡例 -->
   <div id="legend">
@@ -626,11 +651,16 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
 <script>
 const map = L.map('map', {
   zoomControl: false,
   bounceAtZoomLimits: false,
   touchZoom: true,
+  rotate: true,
+  rotateControl: false, /* 独自トグルボタンを使うのでプラグイン標準の回転UIは出さない */
+  bearing: 0,
+  touchRotate: true,
 }).setView([36.5, 138.0], 9);
 L.control.zoom({ position: 'topright' }).addTo(map);
 
@@ -731,6 +761,99 @@ let fogMode = false;
 const fogCanvas = document.getElementById('fog-canvas');
 const fogCtx = fogCanvas.getContext('2d');
 
+// 霧の晴れ半径（実世界メートル基準値）。現在は未使用だが、調整用に関数は残置。
+const FOG_CLEAR_RADIUS_METERS = 120;
+
+// 指定緯度・ズームでの「メートル→ピクセル」換算（Web Mercatorタイル基準の近似式）
+// 現状の呼び出し箇所では使っていないが、メートル基準に戻したい場合のために残す。
+function metersToPixels(meters, lat, zoom) {
+  const EARTH_CIRCUMFERENCE_M = 40075017;
+  const metersPerPixel = EARTH_CIRCUMFERENCE_M * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom + 8);
+  return meters / metersPerPixel;
+}
+
+// OSM標準スタイル(osm-carto)における林道クラス(track/unclassified等の細道)の
+// ズームレベル別おおよその描画幅(px)の目安。タイルから実測はできないため近似値。
+// 現在は未使用（晴れ半径はFOG_CLEAR_RADIUS_PX_BY_ZOOMを直接参照する方式に変更）だが、調整用に残置。
+const TRACK_ROAD_WIDTH_PX_BY_ZOOM = {
+  9: 0.5, 10: 0.5, 11: 0.6, 12: 0.7, 13: 0.8,
+  14: 1.0, 15: 1.3, 16: 1.8, 17: 2.5, 18: 3.5, 19: 5.0
+};
+const FOG_CLEAR_RADIUS_ROAD_WIDTH_MULTIPLIER = 6;
+const FOG_CLEAR_RADIUS_MIN_PX = 5;
+
+// ズーム(小数含む)から林道の描画幅(px)を線形補間で求める（現在は未使用、調整用に残置）
+function getTrackRoadWidthPx(zoom) {
+  const keys = Object.keys(TRACK_ROAD_WIDTH_PX_BY_ZOOM).map(Number);
+  const minZ = Math.min(...keys), maxZ = Math.max(...keys);
+  const z = Math.max(minZ, Math.min(maxZ, zoom));
+  const floor = Math.floor(z), ceil = Math.ceil(z);
+  if (floor === ceil) return TRACK_ROAD_WIDTH_PX_BY_ZOOM[floor];
+  const t = z - floor;
+  return TRACK_ROAD_WIDTH_PX_BY_ZOOM[floor] * (1 - t) + TRACK_ROAD_WIDTH_PX_BY_ZOOM[ceil] * t;
+}
+
+// 霧の晴れ半径(px)をズームレベルごとに直接指定するテーブル。
+// 広域(8〜13)は目視で確認できる程度に控えめ、拡大するにつれて滑らかに増加し、高ズーム(17〜19)で20〜30px程度になるカーブ。
+const FOG_CLEAR_RADIUS_PX_BY_ZOOM = {
+  8: 5, 9: 5, 10: 5, 11: 5, 12: 5, 13: 5,
+  14: 10, 15: 15, 16: 18, 17: 22, 18: 26, 19: 30
+};
+
+// ズーム(小数含む)からFOG_CLEAR_RADIUS_PX_BY_ZOOMを線形補間で求める（getTrackRoadWidthPxと同じロジック）
+function getFogClearRadiusFromTable(zoom) {
+  const keys = Object.keys(FOG_CLEAR_RADIUS_PX_BY_ZOOM).map(Number);
+  const minZ = Math.min(...keys), maxZ = Math.max(...keys);
+  const z = Math.max(minZ, Math.min(maxZ, zoom));
+  const floor = Math.floor(z), ceil = Math.ceil(z);
+  if (floor === ceil) return FOG_CLEAR_RADIUS_PX_BY_ZOOM[floor];
+  const t = z - floor;
+  return FOG_CLEAR_RADIUS_PX_BY_ZOOM[floor] * (1 - t) + FOG_CLEAR_RADIUS_PX_BY_ZOOM[ceil] * t;
+}
+
+// 現在地アイコン(circleMarker radius=8, weight=2)の画面上の実際の直径 ≈ (radius + weight/2) * 2
+const CURRENT_LOCATION_ICON_SIZE_PX = (8 + 2 / 2) * 2;
+
+// 霧の晴れ半径(px)方式2：現在地アイコン基準アンカー＋線形減衰。
+// z19時点の半径をアイコン実寸の1.2倍とし、ズームが下がるごとに減衰させる。
+const ANCHOR_RADIUS_PX = CURRENT_LOCATION_ICON_SIZE_PX * 1.2;
+// z19からこのズームで下限(FOG_CLEAR_RADIUS_MIN_PX)に到達するよう減衰幅を逆算
+const ANCHOR_DECAY_FLOOR_ZOOM = 12;
+const ANCHOR_DECAY_PER_ZOOM = (ANCHOR_RADIUS_PX - FOG_CLEAR_RADIUS_MIN_PX) / (19 - ANCHOR_DECAY_FLOOR_ZOOM);
+
+// ズーム(小数含む)からアイコン基準アンカー方式の晴れ半径を求める（クランプなし、下限適用はgetFogClearRadiusPx側で行う）
+function getFogClearRadiusFromIconAnchor(zoom) {
+  return ANCHOR_RADIUS_PX - (19 - zoom) * ANCHOR_DECAY_PER_ZOOM;
+}
+
+// 霧の晴れ半径(px)。下限FOG_CLEAR_RADIUS_MIN_PXでクランプする。
+// 旧テーブル方式に戻す場合はこの1行を getFogClearRadiusFromTable(zoom) に差し替えるだけでOK。
+function getFogClearRadiusPx(zoom) {
+  return Math.max(FOG_CLEAR_RADIUS_MIN_PX, getFogClearRadiusFromIconAnchor(zoom));
+}
+
+// 晴れ半径(px)をその場の緯度・ズームでおおよそのメートルに変換（間引き判定専用）
+function fogRadiusPxToMeters(px, lat, zoom) {
+  const EARTH_CIRCUMFERENCE_M = 40075017;
+  const metersPerPixel = EARTH_CIRCUMFERENCE_M * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom + 8);
+  return px * metersPerPixel;
+}
+
+// 描画専用の間引き：記録データ(points)自体は変更せず、fogを晴らす対象点だけを間引いた配列を返す。
+// 直前に採用した点から実距離でminDistanceMeters未満の点はスキップする。
+function decimatePointsForFog(points, minDistanceMeters) {
+  if (points.length <= 1 || minDistanceMeters <= 0) return points;
+  const kept = [points[0]];
+  let last = points[0];
+  for (let i = 1; i < points.length; i++) {
+    if (map.distance(last, points[i]) >= minDistanceMeters) {
+      kept.push(points[i]);
+      last = points[i];
+    }
+  }
+  return kept;
+}
+
 function toggleFogMode() {
   fogMode = !fogMode;
   const btn = document.getElementById('fog-toggle-btn');
@@ -765,7 +888,8 @@ function drawFog() {
   fogCtx.fillRect(0, 0, w, h);
   fogCtx.globalCompositeOperation = 'destination-out';
 
-  const clearRadius = 16; /* 変更前: 32 (GPSアイコンradius:8 の約2倍) */
+  const zoom = map.getZoom();
+  const clearRadius = getFogClearRadiusPx(zoom);
   const clearFogAt = ll => {
     const pt = map.latLngToContainerPoint(ll);
     const grad = fogCtx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, clearRadius);
@@ -776,13 +900,97 @@ function drawFog() {
     fogCtx.fillRect(pt.x - clearRadius, pt.y - clearRadius, clearRadius * 2, clearRadius * 2);
   };
 
-  tracks.forEach(t => t.segments.flat().forEach(clearFogAt));
-  gpsSegments.flat().forEach(clearFogAt); /* 記録中のGPSトラックも霧を晴らす */
+  /* 点密度が晴れ半径より高いと円が重なり過ぎて帯状に潰れるため、描画専用に間引く（記録データ自体は変更しない） */
+  const clearRadiusMeters = fogRadiusPxToMeters(clearRadius, map.getCenter().lat, zoom);
+  const fogDecimationMinDistance = clearRadiusMeters / 2;
+
+  tracks.forEach(t => t.segments.forEach(seg => decimatePointsForFog(seg, fogDecimationMinDistance).forEach(clearFogAt)));
+  gpsSegments.forEach(seg => decimatePointsForFog(seg, fogDecimationMinDistance).forEach(clearFogAt)); /* 記録中のGPSトラックも霧を晴らす */
 
   fogCtx.globalCompositeOperation = 'source-over';
 }
 
 map.on('move zoom moveend zoomend', () => { if (fogMode) drawFog(); });
+
+// ---- ヘディングアップ ----
+let headingUp = false;
+let headingOrientationEventName = null;
+
+function loadHeadingUpPref() {
+  return localStorage.getItem('jimny_heading_up') === '1';
+}
+function saveHeadingUpPref(v) {
+  localStorage.setItem('jimny_heading_up', v ? '1' : '0');
+}
+
+// iOSはwebkitCompassHeadingで真北基準の値を直接取得できる。
+// Androidはalpha(反時計回り)を反転し、画面の向き(screen.orientation.angle)を補正する必要があるが、
+// 実機ごとにズレが出ることがあるため実機確認しながら調整すること。
+function computeCompassHeading(event) {
+  if (typeof event.webkitCompassHeading === 'number') {
+    return event.webkitCompassHeading;
+  }
+  if (event.alpha === null || event.alpha === undefined) return null;
+  const screenAngle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  return (360 - event.alpha + screenAngle + 360) % 360;
+}
+
+function handleOrientationEvent(event) {
+  if (!headingUp) return;
+  const heading = computeCompassHeading(event);
+  if (heading === null) return;
+  map.setBearing(heading);
+  if (fogMode) drawFog();
+}
+
+function startHeadingUp() {
+  headingOrientationEventName = ('ondeviceorientationabsolute' in window) ? 'deviceorientationabsolute' : 'deviceorientation';
+  window.addEventListener(headingOrientationEventName, handleOrientationEvent);
+  headingUp = true;
+  saveHeadingUpPref(true);
+  updateHeadingToggleBtn();
+}
+
+function stopHeadingUp() {
+  if (headingOrientationEventName) {
+    window.removeEventListener(headingOrientationEventName, handleOrientationEvent);
+    headingOrientationEventName = null;
+  }
+  headingUp = false;
+  saveHeadingUpPref(false);
+  map.setBearing(0);
+  if (fogMode) drawFog();
+  updateHeadingToggleBtn();
+}
+
+function updateHeadingToggleBtn() {
+  document.getElementById('heading-toggle-btn').classList.toggle('active', headingUp);
+}
+
+async function toggleHeadingUp() {
+  if (headingUp) { stopHeadingUp(); return; }
+
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const result = await DeviceOrientationEvent.requestPermission();
+      if (result !== 'granted') {
+        alert('コンパスの利用が許可されませんでした');
+        return;
+      }
+    } catch (e) {
+      alert('コンパスの利用が許可されませんでした');
+      return;
+    }
+  }
+  startHeadingUp();
+}
+
+function initHeadingUpRecovery() {
+  if (!loadHeadingUpPref()) return;
+  // iOSは許可状態がページ再読み込みで引き継がれないため自動再開できない（再タップで再許可が必要）
+  const needsIOSPermission = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function';
+  if (!needsIOSPermission) startHeadingUp();
+}
 
 function openHistory() {
   const list = document.getElementById('history-list');
@@ -1416,6 +1624,7 @@ function loadFromStorage() {
 
 loadFromStorage();
 initSessionRecovery();
+initHeadingUpRecovery();
 </script>
 </body>
 </html>
