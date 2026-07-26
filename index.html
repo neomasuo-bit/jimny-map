@@ -891,7 +891,7 @@ function toggleFogMode() {
 // 描画されるため、キャンバス自体をCSSで現在のbearing分だけ回転させて画面表示と合わせる必要がある。
 // 矩形バッファのままだと回転角度によって「隅」から先に破綻するため、どの向きに回転しても
 // 均等に安全な「円形」バッファ（ビューポート対角線の半分を基準にした半径）に変更する。
-const FOG_CIRCULAR_SAFETY_MULTIPLIER = 1.5; // 半径 = (対角線/2) × この倍率
+const FOG_CIRCULAR_SAFETY_MULTIPLIER = 3.0; // 半径 = (対角線/2) × この倍率
 const FOG_BUFFER_THRESHOLD_RATIO = 0.7; // 半径のこの割合パンしたら再センタリング（既存のまま維持）
 let fogCenterLatLng = null; // 直近フル再描画時の地図中心（バッファキャンバス中心が指す地理座標）
 let fogRedrawZoom = null;   // 直近フル再描画時のズーム
