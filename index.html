@@ -501,7 +501,12 @@
   <button id="locate-btn" onclick="goToCurrentLocation()" title="現在地へ">⊕</button>
 
   <!-- ヘディングアップ切替 -->
-  <button id="heading-toggle-btn" onclick="toggleHeadingUp()" title="ヘディングアップ切替">🧭</button>
+  <button id="heading-toggle-btn" onclick="toggleHeadingUp()" title="ヘディングアップ切替">
+    <svg viewBox="0 0 24 24" width="22" height="22" xmlns="http://www.w3.org/2000/svg">
+      <polygon points="12,2 15.5,12 12,10 8.5,12" fill="currentColor"/>
+      <polygon points="12,22 15.5,12 12,14 8.5,12" fill="currentColor" opacity="0.4"/>
+    </svg>
+  </button>
 
   <!-- 凡例 -->
   <div id="legend">
