@@ -899,14 +899,25 @@ function drawFog() {
 
   const zoom = map.getZoom();
   const clearRadius = getFogClearRadiusPx(zoom);
+
+  /* ピンチズーム中はLeafletがzoomanimを介さず毎フレームdrawFog()を直接呼ぶため、
+     GPS点ごとにcreateRadialGradientするとコストが積み上がり重くなる。
+     半径分の「晴らしブラシ」を1回だけオフスクリーンに描いて使い回す（drawImageは軽い）。 */
+  const brushSize = Math.max(1, Math.ceil(clearRadius * 2));
+  const brush = document.createElement('canvas');
+  brush.width = brushSize;
+  brush.height = brushSize;
+  const brushCtx = brush.getContext('2d');
+  const grad = brushCtx.createRadialGradient(clearRadius, clearRadius, 0, clearRadius, clearRadius, clearRadius);
+  grad.addColorStop(0, 'rgba(0,0,0,1)');
+  grad.addColorStop(0.6, 'rgba(50,50,50,0.85)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  brushCtx.fillStyle = grad;
+  brushCtx.fillRect(0, 0, brushSize, brushSize);
+
   const clearFogAt = ll => {
     const pt = map.latLngToContainerPoint(ll);
-    const grad = fogCtx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, clearRadius);
-    grad.addColorStop(0, 'rgba(0,0,0,1)');
-    grad.addColorStop(0.6, 'rgba(50,50,50,0.85)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    fogCtx.fillStyle = grad;
-    fogCtx.fillRect(pt.x - clearRadius, pt.y - clearRadius, clearRadius * 2, clearRadius * 2);
+    fogCtx.drawImage(brush, pt.x - clearRadius, pt.y - clearRadius);
   };
 
   /* 点密度が晴れ半径より高いと円が重なり過ぎて帯状に潰れるため、描画専用に間引く（記録データ自体は変更しない） */
