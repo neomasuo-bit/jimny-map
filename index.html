@@ -678,15 +678,18 @@ L.control.zoom({ position: 'topright' }).addTo(map);
   }
 });
 
+// keepBuffer: 4（デフォルト2から増量）でパン時に周辺タイルをより広く保持し、再取得を減らす。
+// updateWhenZooming: false でズーム中の中間ズームレベルでのタイル取得を止め、
+// アニメーション完了時の最終ズームでのみ取得する（低速回線でのリクエスト集中を緩和）。
 const layers = {
   standard: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap', maxZoom: 18
+    attribution: '© OpenStreetMap', maxZoom: 18, keepBuffer: 4, updateWhenZooming: false
   }),
   topo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenTopoMap', maxZoom: 17
+    attribution: '© OpenTopoMap', maxZoom: 17, keepBuffer: 4, updateWhenZooming: false
   }),
   satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    attribution: '© Esri', maxZoom: 18
+    attribution: '© Esri', maxZoom: 18, keepBuffer: 4, updateWhenZooming: false
   })
 };
 let currentLayer = layers.standard;
@@ -883,19 +886,48 @@ function toggleFogMode() {
   saveSessionState();
 }
 
+// ---- 霧レイヤーのバッファ描画（円形カバレッジ方式） ----
+// ヘディングアップ(コンパス回転)時、fog-canvasの中身はmap.project()で北基準(回転非対応)に
+// 描画されるため、キャンバス自体をCSSで現在のbearing分だけ回転させて画面表示と合わせる必要がある。
+// 矩形バッファのままだと回転角度によって「隅」から先に破綻するため、どの向きに回転しても
+// 均等に安全な「円形」バッファ（ビューポート対角線の半分を基準にした半径）に変更する。
+const FOG_CIRCULAR_SAFETY_MULTIPLIER = 1.5; // 半径 = (対角線/2) × この倍率
+const FOG_BUFFER_THRESHOLD_RATIO = 0.7; // 半径のこの割合パンしたら再センタリング（既存のまま維持）
+let fogCenterLatLng = null; // 直近フル再描画時の地図中心（バッファキャンバス中心が指す地理座標）
+let fogRedrawZoom = null;   // 直近フル再描画時のズーム
+let fogPanOffset = null;    // 直近の追従translateオフセット（再センタリング直後はゼロ）
+
+// 現在のパンオフセット(translate)と現在のbearing(rotate)を合成してcanvasに適用する。
+// bearingは絶対値をそのまま使う（描画内容は常に北基準なので、現在のbearingで回転させれば画面と一致する）。
+function applyFogCanvasTransform() {
+  const bearing = (map.getBearing ? map.getBearing() : 0) || 0;
+  const p = fogPanOffset || L.point(0, 0);
+  fogCanvas.style.transform = `translate3d(${p.x}px, ${p.y}px, 0) rotate(${bearing}deg)`;
+}
+
 function drawFog() {
   if (!fogMode) return;
-  const w = fogCanvas.offsetWidth;
-  const h = fogCanvas.offsetHeight;
-  fogCanvas.width = w;
-  fogCanvas.height = h;
+  const size = map.getSize();
+  const diagonal = Math.hypot(size.x, size.y);
+  const radius = (diagonal / 2) * FOG_CIRCULAR_SAFETY_MULTIPLIER;
+  const canvasSide = Math.round(radius * 2);
+  fogCanvas.width = canvasSide;
+  fogCanvas.height = canvasSide;
+  fogCanvas.style.width = canvasSide + 'px';
+  fogCanvas.style.height = canvasSide + 'px';
+  fogCanvas.style.left = Math.round((size.x - canvasSide) / 2) + 'px';
+  fogCanvas.style.top = Math.round((size.y - canvasSide) / 2) + 'px';
+  fogPanOffset = L.point(0, 0); /* 再センタリングするので追従オフセットはリセット（回転は現在値を維持） */
+  applyFogCanvasTransform();
+
+  fogCenterLatLng = map.getCenter();
+  fogRedrawZoom = map.getZoom();
 
   fogCtx.fillStyle = 'rgba(50,50,50,0.6)'; /* 変更前: 0.80 */
-  fogCtx.fillRect(0, 0, w, h);
+  fogCtx.fillRect(0, 0, canvasSide, canvasSide);
   fogCtx.globalCompositeOperation = 'destination-out';
 
-  const zoom = map.getZoom();
-  const clearRadius = getFogClearRadiusPx(zoom);
+  const clearRadius = getFogClearRadiusPx(fogRedrawZoom);
 
   /* ピンチズーム中はLeafletがzoomanimを介さず毎フレームdrawFog()を直接呼ぶため、
      GPS点ごとにcreateRadialGradientするとコストが積み上がり重くなる。
@@ -912,13 +944,20 @@ function drawFog() {
   brushCtx.fillStyle = grad;
   brushCtx.fillRect(0, 0, brushSize, brushSize);
 
+  /* バッファキャンバス基準（fogCenterLatLngからの相対位置）で描画位置を計算する。
+     map.latLngToContainerPointは「今のビューポート」基準なので使わず、map.project()
+     （公開API）で世界座標系のピクセル位置を求めてから中心点との差分を取る。
+     このcanvas自体はCSSのrotate()で見た目を回転させるだけなので、内容は常に北基準のまま。 */
+  const centerWorldPt = map.project(fogCenterLatLng, fogRedrawZoom);
   const clearFogAt = ll => {
-    const pt = map.latLngToContainerPoint(ll);
-    fogCtx.drawImage(brush, pt.x - clearRadius, pt.y - clearRadius);
+    const worldPt = map.project(ll, fogRedrawZoom);
+    const x = worldPt.x - centerWorldPt.x + canvasSide / 2;
+    const y = worldPt.y - centerWorldPt.y + canvasSide / 2;
+    fogCtx.drawImage(brush, x - clearRadius, y - clearRadius);
   };
 
   /* 点密度が晴れ半径より高いと円が重なり過ぎて帯状に潰れるため、描画専用に間引く（記録データ自体は変更しない） */
-  const clearRadiusMeters = fogRadiusPxToMeters(clearRadius, map.getCenter().lat, zoom);
+  const clearRadiusMeters = fogRadiusPxToMeters(clearRadius, fogCenterLatLng.lat, fogRedrawZoom);
   const fogDecimationMinDistance = clearRadiusMeters / 2;
 
   tracks.forEach(t => t.segments.forEach(seg => decimatePointsForFog(seg, fogDecimationMinDistance).forEach(clearFogAt)));
@@ -927,7 +966,35 @@ function drawFog() {
   fogCtx.globalCompositeOperation = 'source-over';
 }
 
-map.on('move zoom moveend zoomend', () => { if (fogMode) drawFog(); });
+// パン・ズームのたびに呼ばれる軽量ハンドラ。ズームが変わった場合、または円形バッファの
+// 半径を超えてパンした場合のみdrawFog()でフル再描画する。それ以外は再描画せずCSS transformで
+// キャンバスをずらすだけ（コストほぼゼロ）。円形バッファは回転しても形が変わらないため、
+// 判定はX/Y独立ではなくMath.hypot()によるユークリッド距離で行う。
+function onMapViewChange() {
+  if (!fogMode) return;
+  if (fogCenterLatLng === null || map.getZoom() !== fogRedrawZoom) {
+    drawFog();
+    return;
+  }
+
+  const size = map.getSize();
+  const diagonal = Math.hypot(size.x, size.y);
+  const radius = (diagonal / 2) * FOG_CIRCULAR_SAFETY_MULTIPLIER;
+
+  const centerNowPt = map.latLngToContainerPoint(fogCenterLatLng);
+  const panOffset = L.point(centerNowPt.x - size.x / 2, centerNowPt.y - size.y / 2);
+
+  if (Math.hypot(panOffset.x, panOffset.y) > radius * FOG_BUFFER_THRESHOLD_RATIO) {
+    drawFog();
+  } else {
+    fogPanOffset = panOffset;
+    applyFogCanvasTransform();
+  }
+}
+
+map.on('move zoom moveend zoomend', onMapViewChange);
+// ウィンドウリサイズ・画面回転でビューポートサイズが変わった場合もバッファがズレるため再センタリング
+window.addEventListener('resize', () => { if (fogMode) drawFog(); });
 
 // ---- ヘディングアップ ----
 let headingUp = false;
@@ -957,7 +1024,9 @@ function handleOrientationEvent(event) {
   const heading = computeCompassHeading(event);
   if (heading === null) return;
   map.setBearing(heading);
-  if (fogMode) drawFog();
+  /* 霧の内容は北基準で描画済みなので、bearingが変わっただけならフル再描画は不要。
+     canvasの回転transformを更新するだけで画面表示と一致する。 */
+  if (fogMode) applyFogCanvasTransform();
 }
 
 function startHeadingUp() {
@@ -976,7 +1045,7 @@ function stopHeadingUp() {
   headingUp = false;
   saveHeadingUpPref(false);
   map.setBearing(0);
-  if (fogMode) drawFog();
+  if (fogMode) applyFogCanvasTransform();
   updateHeadingToggleBtn();
 }
 
